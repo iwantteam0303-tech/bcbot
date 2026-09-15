@@ -45,14 +45,51 @@ module.exports = function(BOT_TOKEN) {
 
     const stripAnsi = (str) => str.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
 
-        function initTerminal() {
+            function initTerminal() {
         if (ptyProcess) ptyProcess.kill();
         
-        // 💡 [핵심] 고장난 node-pty 모듈 대신, 파이썬 내장 모듈을 이용해 완벽한 가상 터미널(TTY) 껍데기를 만들어 bash를 실행합니다.
-        ptyProcess = spawn('python', ['-c', 'import pty; pty.spawn("bash")'], { 
+        // 💡 [핵심] node-pty 대신 Termux 순정 PTY 에뮬레이터(script)를 사용하여 완벽한 가상 터미널 생성
+        ptyProcess = spawn('script', ['-q', '-c', 'bash', '/dev/null'], { 
             cwd: process.env.HOME, 
-            env: process.env 
+            env: { ...process.env, TERM: 'xterm-256color' } 
         });
+
+        const handleData = (data) => {
+            outputBuffer += stripAnsi(data.toString());
+            if (sendTimer) clearTimeout(sendTimer);
+            
+            sendTimer = setTimeout(async () => {
+                if (!outputBuffer.trim() || !targetChannelId) return;
+                
+                const outChannelId = activeThreadId ? activeThreadId : targetChannelId;
+                const channel = client.channels.cache.get(outChannelId);
+                
+                if (channel) {
+                    const maxLen = 1950;
+                    const lines = outputBuffer.split('\n');
+                    let chunk = '';
+                    for (const line of lines) {
+                        if (line.length > maxLen) {
+                            if (chunk) { await channel.send(`\`\`\`text\n${chunk}\`\`\``); chunk = ''; }
+                            for (let i = 0; i < line.length; i += maxLen) await channel.send(`\`\`\`text\n${line.slice(i, i + maxLen)}\`\`\``);
+                            continue;
+                        }
+                        if (chunk.length + line.length + 1 > maxLen) {
+                            await channel.send(`\`\`\`text\n${chunk}\`\`\``);
+                            chunk = line + '\n';
+                        } else chunk += line + '\n';
+                    }
+                    if (chunk.trim()) await channel.send(`\`\`\`text\n${chunk}\`\`\``);
+                }
+                outputBuffer = '';
+                sendTimer = null;
+            }, 800);
+        };
+
+        ptyProcess.stdout.on('data', handleData);
+        ptyProcess.stderr.on('data', handleData);
+    }
+
 
         const handleData = (data) => {
 // ... 아래는 기존 코드와 동일 ...
