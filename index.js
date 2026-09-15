@@ -464,7 +464,7 @@ module.exports = function(BOT_TOKEN) {
 
     client.on('messageCreate', (message) => {
         if (message.author.bot) return;
-        if (message.channel.id === targetChannelId && message.author.id === ownerId && !message.content.startsWith('/')) {
+        if (message.channel.id === targetChannelId && message.author.id === ownerId && !message.content.startsWith('§')) {
             if (ptyProcess) ptyProcess.write(message.content + '\r');
         }
         if (activeThreadId && message.channel.id === activeThreadId && message.author.id === ownerId) {
