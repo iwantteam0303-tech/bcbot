@@ -405,4 +405,51 @@ module.exports = function(BOT_TOKEN) {
             const itemId = interaction.customId.replace('buy_', ''); const item = db.shopItems[itemId];
             const userTickets = db.tickets[interaction.user.id] || 0;
             if (userTickets < item.price) return interaction.reply({ content: `❌ 티켓 부족`, ephemeral: true });
-            activeSessions[interactio
+            activeSessions[interaction.user.id] = { itemId, currentChunk: 0, answers: {} };
+            await showModalChunk(interaction, interaction.user.id);
+        }
+
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_form_')) {
+            const session = activeSessions[interaction.user.id];
+            if (!session) return interaction.reply({ content: '❌ 시간 초과', ephemeral: true });
+            const item = db.shopItems[session.itemId];
+            const chunkStart = session.currentChunk * 5; const currentOptions = item.options.slice(chunkStart, chunkStart + 5);
+            for (const opt of currentOptions) {
+                const rawVal = interaction.fields.getTextInputValue(`input_${opt}`);
+                if (!/^[a-zA-Z0-9]+$/.test(rawVal)) { delete activeSessions[interaction.user.id]; return interaction.reply({ content: `❌ 영문/숫자만 가능`, ephemeral: true }); }
+                session.answers[opt] = rawVal;
+            }
+            if ((session.currentChunk + 1) * 5 < item.options.length) {
+                session.currentChunk += 1; await showModalChunk(interaction, interaction.user.id);
+            } else {
+                db.tickets[interaction.user.id] -= item.price; saveDB();
+                sequenceQueue.push({ interaction, userId: interaction.user.id, itemTitle: item.title, answers: session.answers, sequenceAST: item.sequenceAST });
+                await updateQueueEmbed();
+                await interaction.reply({ content: `✅ 대기열에 등록되었습니다.`, ephemeral: true });
+                delete activeSessions[interaction.user.id]; processQueue();
+            }
+        }
+    });
+
+    async function showModalChunk(interaction, userId) {
+        const session = activeSessions[userId]; const item = db.shopItems[session.itemId];
+        const chunkStart = session.currentChunk * 5; const currentOptions = item.options.slice(chunkStart, chunkStart + 5);
+        const modal = new ModalBuilder().setCustomId(`modal_form_${session.itemId}_${session.currentChunk}`).setTitle(`📝 상품 정보 입력`);
+        for (const opt of currentOptions) {
+            modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`input_${opt}`).setLabel(opt).setStyle(TextInputStyle.Short).setRequired(true)));
+        }
+        await interaction.showModal(modal);
+    }
+
+    client.on('messageCreate', (message) => {
+        if (message.author.bot) return;
+        if (message.channel.id === targetChannelId && message.author.id === ownerId && !message.content.startsWith('/')) {
+            if (ptyProcess) ptyProcess.write(message.content + '\r');
+        }
+        if (activeThreadId && message.channel.id === activeThreadId && message.author.id === ownerId) {
+            if (ptyProcess) ptyProcess.write(message.content + '\r');
+        }
+    });
+
+    client.login(BOT_TOKEN);
+};
