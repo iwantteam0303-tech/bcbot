@@ -107,13 +107,23 @@ module.exports = function(BOT_TOKEN) {
         const root = { type: 'root', children: [] };
         const stack = [root];
 
-        for (let i = 0; i < flatSeq.length; i++) {
-            let line = flatSeq[i];
+        // 1. 유저가 한 줄에 \n 문자를 섞어 쓴 경우를 위해 배열 완전 평탄화
+        const expandedSeq = [];
+        for (const rawLine of flatSeq) {
+            // 실제 엔터(\n)나 문자열 텍스트(\n) 모두 분리
+            const parts = String(rawLine).split(/\\n|\n/);
+            for (const p of parts) {
+                if (p.trim() !== '') expandedSeq.push(p.trim());
+            }
+        }
+
+        for (let i = 0; i < expandedSeq.length; i++) {
+            let line = expandedSeq[i];
             const currentBlock = stack[stack.length - 1];
 
-            const openMatch = line.match(/^(.*)_include_(.*?)\($/);
+            const openMatch = line.match(/^(.*?)_include_(.*?)\($/);
             if (openMatch) {
-                const node = { type: 'if', cmd: openMatch[1], key: openMatch[2], children: [] };
+                const node = { type: 'if', cmd: openMatch[1].trim(), key: openMatch[2].trim(), children: [] };
                 currentBlock.children.push(node);
                 stack.push(node);
                 continue;
@@ -143,7 +153,7 @@ module.exports = function(BOT_TOKEN) {
         }
 
         if (stack.length > 1) {
-            throw new Error("여는 괄호 '(' 에 매칭되는 닫는 괄호 ')' 가 부족합니다.");
+            throw new Error(`여는 괄호 '(' 에 매칭되는 닫는 괄호 ')' 가 부족합니다. (현재 ${stack.length - 1}개 안 닫힘)`);
         }
 
         return root.children;
@@ -235,7 +245,6 @@ module.exports = function(BOT_TOKEN) {
 
         let thread = null;
         if (termChannel) {
-            // autoArchiveDuration을 1440분(24시간)으로 설정하여 쉽게 닫히지 않게 함
             thread = await termChannel.threads.create({ 
                 name: `[진행중] 👤${user.username}님의 작업`, 
                 autoArchiveDuration: 1440, 
@@ -275,18 +284,12 @@ module.exports = function(BOT_TOKEN) {
             }
         }
         
-        // 💡 작업 완료 후 자동 아카이브 삭제 및 '닫기 버튼' 생성
         if (thread) { 
             await thread.setName(`[완료] 👤${user.username}님의 작업`); 
-            
             const closeRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('close_thread')
-                    .setLabel('🔒 쓰레드 닫기 (확인 완료)')
-                    .setStyle(ButtonStyle.Danger)
+                new ButtonBuilder().setCustomId('close_thread').setLabel('🔒 쓰레드 닫기 (확인 완료)').setStyle(ButtonStyle.Danger)
             );
             await thread.send({ content: '✅ 작업 로그가 모두 기록되었습니다. 내역을 확인하신 후 아래 버튼을 눌러 스레드를 정리하세요.', components: [closeRow] });
-            // await thread.setArchived(true); // <--- 이 부분이 제거되었습니다.
         }
         
         activeThreadId = null; currentTask = null; isExecuting = false;
@@ -396,7 +399,6 @@ module.exports = function(BOT_TOKEN) {
             }
         }
 
-        // 💡 수동으로 쓰레드 닫기 버튼 이벤트 처리
         if (interaction.isButton() && interaction.customId === 'close_thread') {
             if (interaction.user.id !== ownerId) return interaction.reply({ content: '❌ 권한이 없습니다.', ephemeral: true });
             await interaction.reply({ content: '🔒 확인 완료. 쓰레드를 보관 처리합니다.' });
