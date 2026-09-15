@@ -3,7 +3,9 @@ module.exports = function(BOT_TOKEN) {
         Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, 
         EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, REST, Routes, ChannelType 
     } = require('discord.js');
-    const pty = require('node-pty');
+    
+    // 💡 node-pty 제거, 내장 child_process의 spawn 사용
+    const { spawn } = require('child_process');
     const fs = require('fs');
 
     const client = new Client({
@@ -45,10 +47,10 @@ module.exports = function(BOT_TOKEN) {
 
     const stripAnsi = (str) => str.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
 
-            function initTerminal() {
+    function initTerminal() {
         if (ptyProcess) ptyProcess.kill();
         
-        // 💡 [핵심] node-pty 대신 Termux 순정 PTY 에뮬레이터(script)를 사용하여 완벽한 가상 터미널 생성
+        // 💡 Termux 순정 PTY 에뮬레이터(script)를 사용하여 가상 터미널 생성 (파일 저장 권한 문제 해결)
         ptyProcess = spawn('script', ['-q', '-c', 'bash', '/dev/null'], { 
             cwd: process.env.HOME, 
             env: { ...process.env, TERM: 'xterm-256color' } 
@@ -90,58 +92,22 @@ module.exports = function(BOT_TOKEN) {
         ptyProcess.stderr.on('data', handleData);
     }
 
-
-        const handleData = (data) => {
-// ... 아래는 기존 코드와 동일 ...
-
-
-        ptyProcess.on('data', (data) => {
-            outputBuffer += stripAnsi(data);
-            if (sendTimer) clearTimeout(sendTimer);
-            
-            sendTimer = setTimeout(async () => {
-                if (!outputBuffer.trim() || !targetChannelId) return;
-                
-                const outChannelId = activeThreadId ? activeThreadId : targetChannelId;
-                const channel = client.channels.cache.get(outChannelId);
-                
-                if (channel) {
-                    const maxLen = 1950;
-                    const lines = outputBuffer.split('\n');
-                    let chunk = '';
-                    for (const line of lines) {
-                        if (line.length > maxLen) {
-                            if (chunk) { await channel.send(`\`\`\`text\n${chunk}\`\`\``); chunk = ''; }
-                            for (let i = 0; i < line.length; i += maxLen) await channel.send(`\`\`\`text\n${line.slice(i, i + maxLen)}\`\`\``);
-                            continue;
-                        }
-                        if (chunk.length + line.length + 1 > maxLen) {
-                            await channel.send(`\`\`\`text\n${chunk}\`\`\``);
-                            chunk = line + '\n';
-                        } else chunk += line + '\n';
-                    }
-                    if (chunk.trim()) await channel.send(`\`\`\`text\n${chunk}\`\`\``);
-                }
-                outputBuffer = '';
-                sendTimer = null;
-            }, 800);
-        });
-    }
-
     function waitForTerminalReady() {
         return new Promise((resolve) => {
             let waitBuffer = '';
             let idleTimer = null;
             const finish = () => {
-                ptyProcess.removeListener('data', onData);
+                ptyProcess.stdout.removeListener('data', onData);
+                ptyProcess.stderr.removeListener('data', onData);
                 resolve(waitBuffer);
             };
             const onData = (data) => {
-                waitBuffer += stripAnsi(data);
+                waitBuffer += stripAnsi(data.toString());
                 if (idleTimer) clearTimeout(idleTimer);
                 idleTimer = setTimeout(() => { finish(); }, 12000); 
             };
-            ptyProcess.on('data', onData);
+            ptyProcess.stdout.on('data', onData);
+            ptyProcess.stderr.on('data', onData);
             idleTimer = setTimeout(() => { finish(); }, 12000);
         });
     }
@@ -209,7 +175,7 @@ module.exports = function(BOT_TOKEN) {
                 }
 
                 if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\``);
-                ptyProcess.write(actualCmd + '\r');
+                ptyProcess.stdin.write(actualCmd + '\n');
                 execState.finalOutput = await waitForTerminalReady();
 
             } else if (node.type === 'if') {
@@ -222,7 +188,7 @@ module.exports = function(BOT_TOKEN) {
                 }
 
                 if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\` 🔍(조건검사: \`${actualKey}\` 포함 대기)`);
-                ptyProcess.write(actualCmd + '\r');
+                ptyProcess.stdin.write(actualCmd + '\n');
                 execState.finalOutput = await waitForTerminalReady();
 
                 if (execState.finalOutput.includes(actualKey)) {
@@ -309,7 +275,7 @@ module.exports = function(BOT_TOKEN) {
         let isSuccess = true;
 
         try {
-            ptyProcess.write('\x03'); ptyProcess.write('cd ~\r');
+            ptyProcess.stdin.write('\x03'); ptyProcess.stdin.write('cd ~\n');
             await waitForTerminalReady();
             await executeAST(sequenceAST, answers, user, logChannel, execState);
         } catch (err) {
@@ -365,8 +331,8 @@ module.exports = function(BOT_TOKEN) {
             { name: '상점제거', description: '상점 상품 제거', options: [{type: 3, name: '상품id', description: '고유 ID', required: true}] },
             { name: '업데이트', description: '최신 코드를 불러오기 위해 봇을 재부팅합니다.' },
             { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열 JSON', required: true}] },
-            { name: 'db추출', description: '현재 데이터베이스(db.json) 파일을 다운로드합니다.' }, // 💡 새 명령어 추가
-            { name: 'db입력', description: '데이터베이스(db.json) 파일을 업로드하여 덮어씁니다.', options: [{type: 11, name: '파일', description: '업로드할 db.json 파일', required: true}] } // 💡 새 명령어 추가
+            { name: 'db추출', description: '현재 데이터베이스(db.json) 파일을 다운로드합니다.' },
+            { name: 'db입력', description: '데이터베이스(db.json) 파일을 업로드하여 덮어씁니다.', options: [{type: 11, name: '파일', description: '업로드할 db.json 파일', required: true}] }
         ];
 
         const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -457,7 +423,6 @@ module.exports = function(BOT_TOKEN) {
                 return interaction.reply({ embeds: [embed] });
             }
             
-            // 💡 새로 추가된 DB 관련 명령어 처리
             if (cmd === 'db추출') {
                 if (!fs.existsSync(DB_FILE)) {
                     return interaction.reply({ content: '❌ 현재 저장된 DB 파일이 존재하지 않습니다.', ephemeral: true });
@@ -477,18 +442,15 @@ module.exports = function(BOT_TOKEN) {
                     const response = await fetch(file.url);
                     const jsonData = await response.json();
 
-                    // 간단한 DB 구조 검증
                     if (typeof jsonData !== 'object') {
                         return interaction.reply({ content: '❌ 올바른 DB 형식이 아닙니다.', ephemeral: true });
                     }
 
-                    // 기존 DB에 업로드된 내용 덮어쓰기 (병합)
                     db = { ...db, ...jsonData };
                     saveDB();
 
                     await interaction.reply({ content: '✅ 데이터베이스 파일이 성공적으로 적용되었습니다. 상점 및 세팅이 복원되었습니다.', ephemeral: true });
                     
-                    // 상점방이 지정되어 있다면 바로 새로고침
                     if (db.shopChannelId) {
                         const shopChannel = client.channels.cache.get(db.shopChannelId);
                         if (shopChannel) await renderShop(shopChannel);
@@ -562,7 +524,7 @@ module.exports = function(BOT_TOKEN) {
         if (message.author.bot) return;
         
         if ((message.channel.id === targetChannelId || (activeThreadId && message.channel.id === activeThreadId)) && message.author.id === ownerId) {
-            if (ptyProcess) ptyProcess.write(message.content + '\r');
+            if (ptyProcess) ptyProcess.stdin.write(message.content + '\n');
         }
     });
 
