@@ -100,17 +100,12 @@ module.exports = function(BOT_TOKEN) {
         });
     }
 
-    // ==========================================
-    // 🧠 시퀀스 문법 파서 (AST 트리 빌더)
-    // ==========================================
     function buildAST(flatSeq) {
         const root = { type: 'root', children: [] };
         const stack = [root];
 
-        // 1. 유저가 한 줄에 \n 문자를 섞어 쓴 경우를 위해 배열 완전 평탄화
         const expandedSeq = [];
         for (const rawLine of flatSeq) {
-            // 실제 엔터(\n)나 문자열 텍스트(\n) 모두 분리
             const parts = String(rawLine).split(/\\n|\n/);
             for (const p of parts) {
                 if (p.trim() !== '') expandedSeq.push(p.trim());
@@ -159,9 +154,6 @@ module.exports = function(BOT_TOKEN) {
         return root.children;
     }
 
-    // ==========================================
-    // ⚙️ AST 트리 실행기 (재귀 구조)
-    // ==========================================
     async function executeAST(nodes, answers, user, logChannel, execState) {
         for (const node of nodes) {
             if (node.type === 'cmd') {
@@ -197,11 +189,12 @@ module.exports = function(BOT_TOKEN) {
         }
     }
 
-    // --- 대기열 렌더링 영역 ---
+    // --- 대기열 및 상점 렌더링 영역 ---
     async function updateQueueEmbed() {
         if (!db.shopChannelId || !queueMessageId) return;
         const channel = client.channels.cache.get(db.shopChannelId);
         if (!channel) return;
+        
         const embed = new EmbedBuilder().setTitle('⏳ 현재 시스템 대기열').setColor(0xFFA500);
         if (!currentTask && sequenceQueue.length === 0) {
             embed.setDescription('```\n현재 대기 중인 작업이 없습니다.\n```');
@@ -211,9 +204,15 @@ module.exports = function(BOT_TOKEN) {
             for (const task of sequenceQueue) { desc += `**${count}.** <@${task.userId}> - 작업: ${task.itemTitle} \`[⏳ 대기중]\`\n`; count++; }
             embed.setDescription(desc);
         }
+
+        // 💡 대기열 갱신 시에도 '내 티켓 확인' 버튼을 항상 유지
+        const actionRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('check_balance').setLabel('💳 내 코인(티켓) 확인').setStyle(ButtonStyle.Secondary)
+        );
+
         try {
             const msg = await channel.messages.fetch(queueMessageId);
-            await msg.edit({ embeds: [embed] });
+            await msg.edit({ embeds: [embed], components: [actionRow] });
         } catch (e) { queueMessageId = null; }
     }
 
@@ -221,13 +220,18 @@ module.exports = function(BOT_TOKEN) {
         const fetched = await channel.messages.fetch({ limit: 50 });
         await channel.bulkDelete(fetched).catch(() => {});
         if (Object.keys(db.shopItems).length === 0) return channel.send("🛒 현재 상점에 등록된 상품이 없습니다.");
+        
         for (const [itemId, item] of Object.entries(db.shopItems)) {
             const embed = new EmbedBuilder().setTitle(`🎁 ${item.title}`).setDescription(`${item.description}\n\n**가격:** 🎟️ 티켓 ${item.price}개`).setColor(0x00FF00).setFooter({ text: `상품 ID: ${itemId}` });
             const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`buy_${itemId}`).setLabel('구매하기').setStyle(ButtonStyle.Primary).setEmoji('🛒'));
             await channel.send({ embeds: [embed], components: [row] });
         }
+        
         const qEmbed = new EmbedBuilder().setTitle('⏳ 현재 시스템 대기열').setDescription('```\n데이터 동기화 중...\n```').setColor(0xFFA500);
-        const qMsg = await channel.send({ embeds: [qEmbed] });
+        const qRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('check_balance').setLabel('💳 내 코인(티켓) 확인').setStyle(ButtonStyle.Secondary)
+        );
+        const qMsg = await channel.send({ embeds: [qEmbed], components: [qRow] });
         queueMessageId = qMsg.id;
         await updateQueueEmbed();
     }
@@ -306,6 +310,7 @@ module.exports = function(BOT_TOKEN) {
             { name: '터미널설정', description: '이 채널을 터미널로 설정합니다. (초기화 됨)' },
             { name: '티켓수설정', description: '유저의 티켓 수를 지정합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '티켓 수량', required: true}] },
             { name: '티켓주기', description: '유저에게 티켓을 지급합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '추가할 수량', required: true}] },
+            { name: '확인', description: '해당 유저의 데이터(보유 코인 등)를 확인합니다.', options: [{type: 6, name: '유저', description: '조회할 유저', required: true}] }, // 💡 새로 추가된 명령어
             { name: '상점방설정', description: '이 채널을 상점방으로 설정합니다.' },
             { name: '상점추가', description: '상점에 JSON 상품을 추가합니다.', options: [
                 {type: 3, name: '상품id', description: '고유 ID', required: true},
@@ -397,6 +402,26 @@ module.exports = function(BOT_TOKEN) {
                 await interaction.reply({ content: '✅ 제거 완료!', ephemeral: true });
                 if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
             }
+            
+            // 💡 새로 추가된 관리자용 조회 명령어 (/확인)
+            if (cmd === '확인') {
+                const user = interaction.options.getUser('유저');
+                const tickets = db.tickets[user.id] || 0;
+                const embed = new EmbedBuilder()
+                    .setTitle(`📊 ${user.username}님의 데이터 조회`)
+                    .addFields({ name: '보유 코인(티켓)', value: `**${tickets}개**` })
+                    .setColor(0x3498DB);
+                return interaction.reply({ embeds: [embed] });
+            }
+        }
+
+        // 💡 일반 유저용 코인 확인 버튼 이벤트
+        if (interaction.isButton() && interaction.customId === 'check_balance') {
+            const userTickets = db.tickets[interaction.user.id] || 0;
+            return interaction.reply({ 
+                content: `💳 **${interaction.user.username}**님의 현재 보유 코인(티켓)은 **${userTickets}개** 입니다.`, 
+                ephemeral: true // 자신에게만 보이게
+            });
         }
 
         if (interaction.isButton() && interaction.customId === 'close_thread') {
@@ -411,7 +436,7 @@ module.exports = function(BOT_TOKEN) {
         if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
             const itemId = interaction.customId.replace('buy_', ''); const item = db.shopItems[itemId];
             const userTickets = db.tickets[interaction.user.id] || 0;
-            if (userTickets < item.price) return interaction.reply({ content: `❌ 티켓 부족`, ephemeral: true });
+            if (userTickets < item.price) return interaction.reply({ content: `❌ 코인(티켓)이 부족합니다.`, ephemeral: true });
             activeSessions[interaction.user.id] = { itemId, currentChunk: 0, answers: {} };
             await showModalChunk(interaction, interaction.user.id);
         }
