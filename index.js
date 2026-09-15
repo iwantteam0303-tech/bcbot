@@ -111,7 +111,6 @@ module.exports = function(BOT_TOKEN) {
             let line = flatSeq[i];
             const currentBlock = stack[stack.length - 1];
 
-            // 조건부 블록 열기: 명령어_include_키워드(
             const openMatch = line.match(/^(.*)_include_(.*?)\($/);
             if (openMatch) {
                 const node = { type: 'if', cmd: openMatch[1], key: openMatch[2], children: [] };
@@ -120,14 +119,12 @@ module.exports = function(BOT_TOKEN) {
                 continue;
             }
 
-            // 조건부 블록 닫기: 줄 끝에 있는 ) 의 개수를 파악하여 블록을 닫음
             let closeCount = 0;
             let strippedLine = line;
             const closeMatch = strippedLine.match(/(\)+)$/);
 
             if (closeMatch) {
                 const trailingParens = closeMatch[1].length;
-                // 열려있는 블록 수만큼만 ) 를 소진함 (root는 닫을 수 없음)
                 const maxClosable = stack.length - 1;
                 closeCount = Math.min(trailingParens, maxClosable);
 
@@ -136,18 +133,15 @@ module.exports = function(BOT_TOKEN) {
                 }
             }
 
-            // 명령어가 남아있다면 추가 (ex: "kill apple)", ")" 단독 줄 모두 호환)
             if (strippedLine.length > 0) {
                 currentBlock.children.push({ type: 'cmd', cmd: strippedLine });
             }
 
-            // 닫힌 괄호 수만큼 스택에서 제거 (상위 블록으로 이동)
             for (let c = 0; c < closeCount; c++) {
                 stack.pop();
             }
         }
 
-        // 파싱이 끝났는데 스택이 1보다 크면(root가 아니면) 괄호가 안 닫힌 것
         if (stack.length > 1) {
             throw new Error("여는 괄호 '(' 에 매칭되는 닫는 괄호 ')' 가 부족합니다.");
         }
@@ -174,7 +168,6 @@ module.exports = function(BOT_TOKEN) {
                 let actualCmd = node.cmd;
                 let actualKey = node.key;
                 
-                // 명령어와 키워드 모두 모달 응답(save_xxx)으로 치환 가능
                 for (const [key, val] of Object.entries(answers)) {
                     actualCmd = actualCmd.replace(new RegExp(`save_${key}`, 'g'), val);
                     actualKey = actualKey.replace(new RegExp(`save_${key}`, 'g'), val);
@@ -184,7 +177,6 @@ module.exports = function(BOT_TOKEN) {
                 ptyProcess.write(actualCmd + '\r');
                 execState.finalOutput = await waitForTerminalReady();
 
-                // 실행 결과에 키워드가 포함되어 있다면 블록 내부를 재귀적으로 실행
                 if (execState.finalOutput.includes(actualKey)) {
                     if (logChannel) await logChannel.send(`✅ **[조건 만족]** \`${actualKey}\` 문자열이 발견되어 내부 시퀀스를 실행합니다.`);
                     await executeAST(node.children, answers, user, logChannel, execState);
@@ -243,8 +235,17 @@ module.exports = function(BOT_TOKEN) {
 
         let thread = null;
         if (termChannel) {
-            thread = await termChannel.threads.create({ name: `[진행중] 👤${user.username}님의 작업`, autoArchiveDuration: 60, type: ChannelType.PrivateThread }).catch(() => null); 
-            if (thread) { activeThreadId = thread.id; await thread.send(`🛠️ **[작업 시작]** <@${user.id}> 님의 **${itemTitle}** 작업을 시작합니다.`); }
+            // autoArchiveDuration을 1440분(24시간)으로 설정하여 쉽게 닫히지 않게 함
+            thread = await termChannel.threads.create({ 
+                name: `[진행중] 👤${user.username}님의 작업`, 
+                autoArchiveDuration: 1440, 
+                type: ChannelType.PrivateThread 
+            }).catch(() => null); 
+            
+            if (thread) { 
+                activeThreadId = thread.id; 
+                await thread.send(`🛠️ **[작업 시작]** <@${user.id}> 님의 **${itemTitle}** 작업을 시작합니다.`); 
+            }
         }
 
         const logChannel = thread || termChannel;
@@ -254,10 +255,7 @@ module.exports = function(BOT_TOKEN) {
         try {
             ptyProcess.write('\x03'); ptyProcess.write('cd ~\r');
             await waitForTerminalReady();
-            
-            // 파싱된 AST 트리 실행
             await executeAST(sequenceAST, answers, user, logChannel, execState);
-            
         } catch (err) {
             if (logChannel) await logChannel.send(`❌ **[시스템 에러]** ${err.message}`);
             isSuccess = false;
@@ -276,7 +274,21 @@ module.exports = function(BOT_TOKEN) {
                 try { await interaction.followUp({ content: '⚠️ 작업 완료(코드 추출 실패)', ephemeral: true }); } catch (e) {}
             }
         }
-        if (thread) { await thread.setName(`[완료] 👤${user.username}님의 작업`); await thread.setArchived(true); }
+        
+        // 💡 작업 완료 후 자동 아카이브 삭제 및 '닫기 버튼' 생성
+        if (thread) { 
+            await thread.setName(`[완료] 👤${user.username}님의 작업`); 
+            
+            const closeRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('close_thread')
+                    .setLabel('🔒 쓰레드 닫기 (확인 완료)')
+                    .setStyle(ButtonStyle.Danger)
+            );
+            await thread.send({ content: '✅ 작업 로그가 모두 기록되었습니다. 내역을 확인하신 후 아래 버튼을 눌러 스레드를 정리하세요.', components: [closeRow] });
+            // await thread.setArchived(true); // <--- 이 부분이 제거되었습니다.
+        }
+        
         activeThreadId = null; currentTask = null; isExecuting = false;
         await updateQueueEmbed();
         if (sequenceQueue.length > 0) setTimeout(processQueue, 3000); 
@@ -300,8 +312,8 @@ module.exports = function(BOT_TOKEN) {
                 {type: 4, name: '가격', description: '가격', required: true}
             ]},
             { name: '상점제거', description: '상점 상품 제거', options: [{type: 3, name: '상품id', description: '고유 ID', required: true}] },
-            { name: '업데이트', description: '최신 Gist 코드를 불러오기 위해 봇을 재부팅합니다.' },
-            { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열이 있는 JSON', required: true}] }
+            { name: '업데이트', description: '최신 코드를 불러오기 위해 봇을 재부팅합니다.' },
+            { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열 JSON', required: true}] }
         ];
 
         const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -315,18 +327,16 @@ module.exports = function(BOT_TOKEN) {
 
             if (termChannel) {
                 await termChannel.send(`👋 <@${ownerId}>님, 시스템이 성공적으로 재부팅되었습니다!`);
-                
                 if (db.autoSetupSequence && db.autoSetupSequence.length > 0) {
                     await termChannel.send(`🛠️ **[자동 세팅]** 등록된 초기 시퀀스를 실행합니다...`);
                     const execState = { finalOutput: '' };
                     try {
-                        // 저장된 시퀀스도 AST로 파싱 후 실행
                         const ast = buildAST(db.autoSetupSequence);
                         await waitForTerminalReady();
                         await executeAST(ast, {}, { id: ownerId, username: '자동세팅' }, termChannel, execState);
                         await termChannel.send(`✅ **[자동 세팅 완료]** 터미널이 유휴 상태로 전환되었습니다.`);
                     } catch (e) {
-                        await termChannel.send(`❌ **[자동 세팅 실패]** 시퀀스 구조 오류: ${e.message}`);
+                        await termChannel.send(`❌ **[자동 세팅 실패]** 시퀀스 오류: ${e.message}`);
                     }
                 }
             }
@@ -339,56 +349,41 @@ module.exports = function(BOT_TOKEN) {
             const cmd = interaction.commandName;
 
             if (cmd === '터미널설정') {
-                targetChannelId = interaction.channel.id;
-                db.targetChannelId = targetChannelId; saveDB(); initTerminal();
-                return interaction.reply('✅ **채널 설정 및 터미널 초기화 완료.** (재부팅 시에도 유지됩니다)');
+                targetChannelId = interaction.channel.id; db.targetChannelId = targetChannelId; saveDB(); initTerminal();
+                return interaction.reply('✅ **채널 설정 및 터미널 초기화 완료.**');
             }
-
             if (cmd === '업데이트') {
-                await interaction.reply('🔄 **시스템을 재시작합니다.** 잠시 후 Gist에서 최신 코드를 다운로드하여 부팅됩니다.');
+                await interaction.reply('🔄 **시스템을 재시작합니다.** 잠시 후 최신 코드로 부팅됩니다.');
                 setTimeout(() => { process.exit(0); }, 1000); return;
             }
-
             if (cmd === '자동세팅') {
                 const file = interaction.options.getAttachment('json파일');
                 if (!file.name.endsWith('.json')) return interaction.reply({ content: '❌ JSON 파일만 가능합니다.', ephemeral: true });
                 try {
                     const response = await fetch(file.url); const jsonData = await response.json();
                     if (!jsonData.Sequence) return interaction.reply({ content: '❌ Sequence 배열이 없습니다.', ephemeral: true });
-                    
-                    // 등록 전 문법 유효성 검사 (실패 시 여기서 Catch됨)
                     buildAST(jsonData.Sequence);
-                    
                     db.autoSetupSequence = jsonData.Sequence; saveDB();
-                    return interaction.reply('✅ **자동 세팅 시퀀스 등록 완료.** (다음 재부팅 또는 /업데이트 시 실행됩니다)');
+                    return interaction.reply('✅ **자동 세팅 시퀀스 등록 완료.**');
                 } catch (e) {
-                    return interaction.reply({ content: `❌ 파싱 에러(문법 오류): ${e.message}`, ephemeral: true });
+                    return interaction.reply({ content: `❌ 문법 파싱 에러: ${e.message}`, ephemeral: true });
                 }
             }
-
             if (cmd === '상점방설정') {
                 db.shopChannelId = interaction.channel.id; saveDB();
                 await interaction.reply({ content: '✅ 상점 렌더링 중...', ephemeral: true }); await renderShop(interaction.channel); return;
             }
-
             if (cmd === '상점추가') {
-                const id = interaction.options.getString('상품id');
-                const file = interaction.options.getAttachment('json파일');
-                const title = interaction.options.getString('상품제목');
-                const desc = interaction.options.getString('상품설명');
-                const price = interaction.options.getInteger('가격');
+                const id = interaction.options.getString('상품id'); const file = interaction.options.getAttachment('json파일');
+                const title = interaction.options.getString('상품제목'); const desc = interaction.options.getString('상품설명'); const price = interaction.options.getInteger('가격');
                 try {
                     const response = await fetch(file.url); const jsonData = await response.json();
-                    
-                    // 등록 전 문법 유효성 검사
                     const ast = buildAST(jsonData.Sequence);
-                    
                     db.shopItems[id] = { title, description: desc, price, options: jsonData.Options, sequenceAST: ast }; saveDB();
                     await interaction.reply({ content: `✅ 추가 완료!`, ephemeral: true });
                     if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
                 } catch (e) { return interaction.reply({ content: `❌ 에러: ${e.message}`, ephemeral: true }); }
             }
-            
             if (cmd === '티켓수설정' || cmd === '티켓주기') {
                 const user = interaction.options.getUser('유저'); const amt = interaction.options.getInteger('수량');
                 if (cmd === '티켓수설정') db.tickets[user.id] = amt; else db.tickets[user.id] = (db.tickets[user.id] || 0) + amt;
@@ -399,6 +394,16 @@ module.exports = function(BOT_TOKEN) {
                 await interaction.reply({ content: '✅ 제거 완료!', ephemeral: true });
                 if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
             }
+        }
+
+        // 💡 수동으로 쓰레드 닫기 버튼 이벤트 처리
+        if (interaction.isButton() && interaction.customId === 'close_thread') {
+            if (interaction.user.id !== ownerId) return interaction.reply({ content: '❌ 권한이 없습니다.', ephemeral: true });
+            await interaction.reply({ content: '🔒 확인 완료. 쓰레드를 보관 처리합니다.' });
+            if (interaction.channel.isThread()) {
+                await interaction.channel.setArchived(true);
+            }
+            return;
         }
 
         if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
