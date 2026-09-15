@@ -82,7 +82,6 @@ module.exports = function(BOT_TOKEN) {
         });
     }
 
-    // 💡 대기 시간을 12초(12000ms)로 넉넉하게 연장
     function waitForTerminalReady() {
         return new Promise((resolve) => {
             let waitBuffer = '';
@@ -105,11 +104,18 @@ module.exports = function(BOT_TOKEN) {
         const root = { type: 'root', children: [] };
         const stack = [root];
 
-        for (let i = 0; i < flatSeq.length; i++) {
-            let line = flatSeq[i];
+        const expandedSeq = [];
+        for (const rawLine of flatSeq) {
+            const parts = String(rawLine).split(/\\n|\n/);
+            for (const p of parts) {
+                if (p.trim() !== '') expandedSeq.push(p.trim());
+            }
+        }
+
+        for (let i = 0; i < expandedSeq.length; i++) {
+            let line = expandedSeq[i];
             const currentBlock = stack[stack.length - 1];
 
-            // 💡 \n 이 섞여 있어도 통째로 인식하도록 정규식 개선 ([\s\S] 사용)
             const openMatch = line.match(/^([\s\S]*?)_include_([\s\S]*?)\($/);
             if (openMatch) {
                 const node = { type: 'if', cmd: openMatch[1].trim(), key: openMatch[2].trim(), children: [] };
@@ -312,7 +318,9 @@ module.exports = function(BOT_TOKEN) {
             ]},
             { name: '상점제거', description: '상점 상품 제거', options: [{type: 3, name: '상품id', description: '고유 ID', required: true}] },
             { name: '업데이트', description: '최신 코드를 불러오기 위해 봇을 재부팅합니다.' },
-            { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열 JSON', required: true}] }
+            { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열 JSON', required: true}] },
+            { name: 'db추출', description: '현재 데이터베이스(db.json) 파일을 다운로드합니다.' }, // 💡 새 명령어 추가
+            { name: 'db입력', description: '데이터베이스(db.json) 파일을 업로드하여 덮어씁니다.', options: [{type: 11, name: '파일', description: '업로드할 db.json 파일', required: true}] } // 💡 새 명령어 추가
         ];
 
         const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -393,7 +401,6 @@ module.exports = function(BOT_TOKEN) {
                 await interaction.reply({ content: '✅ 제거 완료!', ephemeral: true });
                 if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
             }
-            
             if (cmd === '확인') {
                 const user = interaction.options.getUser('유저');
                 const tickets = db.tickets[user.id] || 0;
@@ -402,6 +409,49 @@ module.exports = function(BOT_TOKEN) {
                     .addFields({ name: '보유 코인(티켓)', value: `**${tickets}개**` })
                     .setColor(0x3498DB);
                 return interaction.reply({ embeds: [embed] });
+            }
+            
+            // 💡 새로 추가된 DB 관련 명령어 처리
+            if (cmd === 'db추출') {
+                if (!fs.existsSync(DB_FILE)) {
+                    return interaction.reply({ content: '❌ 현재 저장된 DB 파일이 존재하지 않습니다.', ephemeral: true });
+                }
+                return interaction.reply({ 
+                    content: '📦 현재 시스템에 저장된 `db.json` 파일입니다.', 
+                    files: [DB_FILE], 
+                    ephemeral: true 
+                });
+            }
+
+            if (cmd === 'db입력') {
+                const file = interaction.options.getAttachment('파일');
+                if (!file.name.endsWith('.json')) return interaction.reply({ content: '❌ JSON 파일만 업로드 가능합니다.', ephemeral: true });
+
+                try {
+                    const response = await fetch(file.url);
+                    const jsonData = await response.json();
+
+                    // 간단한 DB 구조 검증
+                    if (typeof jsonData !== 'object') {
+                        return interaction.reply({ content: '❌ 올바른 DB 형식이 아닙니다.', ephemeral: true });
+                    }
+
+                    // 기존 DB에 업로드된 내용 덮어쓰기 (병합)
+                    db = { ...db, ...jsonData };
+                    saveDB();
+
+                    await interaction.reply({ content: '✅ 데이터베이스 파일이 성공적으로 적용되었습니다. 상점 및 세팅이 복원되었습니다.', ephemeral: true });
+                    
+                    // 상점방이 지정되어 있다면 바로 새로고침
+                    if (db.shopChannelId) {
+                        const shopChannel = client.channels.cache.get(db.shopChannelId);
+                        if (shopChannel) await renderShop(shopChannel);
+                    }
+                    return;
+
+                } catch (e) {
+                    return interaction.reply({ content: `❌ 파일 파싱 에러: ${e.message}`, ephemeral: true });
+                }
             }
         }
 
@@ -464,10 +514,8 @@ module.exports = function(BOT_TOKEN) {
 
     client.on('messageCreate', (message) => {
         if (message.author.bot) return;
-        if (message.channel.id === targetChannelId && message.author.id === ownerId && !message.content.startsWith('§')) {
-            if (ptyProcess) ptyProcess.write(message.content + '\r');
-        }
-        if (activeThreadId && message.channel.id === activeThreadId && message.author.id === ownerId) {
+        
+        if ((message.channel.id === targetChannelId || (activeThreadId && message.channel.id === activeThreadId)) && message.author.id === ownerId) {
             if (ptyProcess) ptyProcess.write(message.content + '\r');
         }
     });
