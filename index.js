@@ -4,9 +4,9 @@ module.exports = function(BOT_TOKEN) {
         EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, REST, Routes, ChannelType 
     } = require('discord.js');
     
-    // 💡 node-pty 제거, 내장 child_process의 spawn 사용
     const { spawn } = require('child_process');
     const fs = require('fs');
+    const path = require('path');
 
     const client = new Client({
         intents: [
@@ -24,12 +24,15 @@ module.exports = function(BOT_TOKEN) {
     let sendTimer = null;
 
     const DB_FILE = './db.json';
-    let db = { tickets: {}, shopChannelId: null, shopItems: {}, targetChannelId: null, autoSetupSequence: [] };
+    let db = { tickets: {}, shopChannelId: null, saveChannelId: null, shopItems: {}, targetChannelId: null, autoSetupSequence: [] };
     const activeSessions = {};
     const sequenceQueue = [];
     let currentTask = null; 
     let isExecuting = false;
     let queueMessageId = null; 
+
+    // 가장 안전한 세이브 모니터링 폴더
+    const WATCH_DIR = path.join(process.env.HOME, 'bcsave');
 
     function loadDB() {
         if (fs.existsSync(DB_FILE)) {
@@ -50,7 +53,6 @@ module.exports = function(BOT_TOKEN) {
     function initTerminal() {
         if (ptyProcess) ptyProcess.kill();
         
-        // 💡 Termux 순정 PTY 에뮬레이터(script)를 사용하여 가상 터미널 생성 (파일 저장 권한 문제 해결)
         ptyProcess = spawn('script', ['-q', '-c', 'bash', '/dev/null'], { 
             cwd: process.env.HOME, 
             env: { ...process.env, TERM: 'xterm-256color' } 
@@ -310,13 +312,49 @@ module.exports = function(BOT_TOKEN) {
         if (sequenceQueue.length > 0) setTimeout(processQueue, 3000); 
     }
 
+    // 💡 [핵심] 3초마다 ~/bcsave 폴더를 스캔해서 새 파일이 있으면 업로드하고 지우는 파일 와쳐
+    function startFileWatcher() {
+        if (!fs.existsSync(WATCH_DIR)) {
+            fs.mkdirSync(WATCH_DIR, { recursive: true });
+        }
+
+        setInterval(async () => {
+            if (!db.saveChannelId) return;
+            const channel = client.channels.cache.get(db.saveChannelId);
+            if (!channel) return;
+
+            try {
+                const files = fs.readdirSync(WATCH_DIR);
+                for (const file of files) {
+                    const filePath = path.join(WATCH_DIR, file);
+                    const stats = fs.statSync(filePath);
+                    
+                    if (stats.isFile()) {
+                        await channel.send({
+                            content: `📦 **[세이브 추출 완료]** 봇 내부에서 새 파일이 감지되었습니다: \`${file}\``,
+                            files: [filePath]
+                        }).catch(() => {});
+                        
+                        // 업로드 완료 후 디스크 용량 관리를 위해 파일 삭제
+                        fs.unlinkSync(filePath);
+                    }
+                }
+            } catch (e) {
+                // 권한 등 기타 에러 무시
+            }
+        }, 3000);
+    }
+
     client.once('ready', async () => {
         console.log(`봇 온라인: ${client.user.tag}`);
         const app = await client.application.fetch();
         ownerId = app.owner.ownerId ? app.owner.ownerId : app.owner.id;
 
+        startFileWatcher(); // 파일 와쳐 시작
+
         const commands = [
             { name: '터미널설정', description: '이 채널을 터미널로 설정합니다. (초기화 됨)' },
+            { name: '세이브방설정', description: '추출된 세이브 파일을 자동으로 업로드할 채널을 설정합니다.' }, // 💡 새 명령어 추가
             { name: '티켓수설정', description: '유저의 티켓 수를 지정합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '티켓 수량', required: true}] },
             { name: '티켓주기', description: '유저에게 티켓을 지급합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '추가할 수량', required: true}] },
             { name: '확인', description: '해당 유저의 데이터(보유 코인 등)를 확인합니다.', options: [{type: 6, name: '유저', description: '조회할 유저', required: true}] },
@@ -370,6 +408,11 @@ module.exports = function(BOT_TOKEN) {
             if (cmd === '터미널설정') {
                 targetChannelId = interaction.channel.id; db.targetChannelId = targetChannelId; saveDB(); initTerminal();
                 return interaction.reply('✅ **채널 설정 및 터미널 초기화 완료.**');
+            }
+            // 💡 새 명령어 처리 구문
+            if (cmd === '세이브방설정') {
+                db.saveChannelId = interaction.channel.id; saveDB();
+                return interaction.reply('✅ **현재 채널이 세이브 파일 자동 업로드 방으로 설정되었습니다.** (`~/bcsave` 폴더 감시 중)');
             }
             if (cmd === '업데이트') {
                 await interaction.reply('🔄 **시스템을 재시작합니다.** 잠시 후 최신 코드로 부팅됩니다.');
