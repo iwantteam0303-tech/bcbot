@@ -45,9 +45,18 @@ module.exports = function(BOT_TOKEN) {
 
     const stripAnsi = (str) => str.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
 
-    function initTerminal() {
+        function initTerminal() {
         if (ptyProcess) ptyProcess.kill();
-        ptyProcess = pty.spawn('bash', [], { name: 'xterm-color', cols: 80, rows: 30, cwd: process.env.HOME, env: process.env });
+        
+        // 💡 [핵심] 고장난 node-pty 모듈 대신, 파이썬 내장 모듈을 이용해 완벽한 가상 터미널(TTY) 껍데기를 만들어 bash를 실행합니다.
+        ptyProcess = spawn('python', ['-c', 'import pty; pty.spawn("bash")'], { 
+            cwd: process.env.HOME, 
+            env: process.env 
+        });
+
+        const handleData = (data) => {
+// ... 아래는 기존 코드와 동일 ...
+
 
         ptyProcess.on('data', (data) => {
             outputBuffer += stripAnsi(data);
