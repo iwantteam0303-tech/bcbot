@@ -354,7 +354,7 @@ module.exports = function(BOT_TOKEN) {
 
         const commands = [
             { name: '터미널설정', description: '이 채널을 터미널로 설정합니다. (초기화 됨)' },
-            { name: '세이브방설정', description: '추출된 세이브 파일을 자동으로 업로드할 채널을 설정합니다.' }, // 💡 새 명령어 추가
+            { name: '세이브방설정', description: '추출된 세이브 파일을 자동으로 업로드할 채널을 설정합니다.' },
             { name: '티켓수설정', description: '유저의 티켓 수를 지정합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '티켓 수량', required: true}] },
             { name: '티켓주기', description: '유저에게 티켓을 지급합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '추가할 수량', required: true}] },
             { name: '확인', description: '해당 유저의 데이터(보유 코인 등)를 확인합니다.', options: [{type: 6, name: '유저', description: '조회할 유저', required: true}] },
@@ -370,7 +370,14 @@ module.exports = function(BOT_TOKEN) {
             { name: '업데이트', description: '최신 코드를 불러오기 위해 봇을 재부팅합니다.' },
             { name: '자동세팅', description: '부팅 시 자동 실행할 시퀀스 JSON을 등록합니다.', options: [{type: 11, name: 'json파일', description: 'Sequence 배열 JSON', required: true}] },
             { name: 'db추출', description: '현재 데이터베이스(db.json) 파일을 다운로드합니다.' },
-            { name: 'db입력', description: '데이터베이스(db.json) 파일을 업로드하여 덮어씁니다.', options: [{type: 11, name: '파일', description: '업로드할 db.json 파일', required: true}] }
+            { name: 'db입력', description: '데이터베이스(db.json) 파일을 업로드하여 덮어씁니다.', options: [{type: 11, name: '파일', description: '업로드할 db.json 파일', required: true}] },
+            
+            // 💡 파일 업로드 명령어 추가
+            { 
+                name: '업로드', 
+                description: '파일을 안드로이드 기기의 /sdcard/download/bcbot 폴더로 업로드합니다.', 
+                options: [{type: 11, name: '파일', description: '업로드할 파일', required: true}] 
+            }
         ];
 
         const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -405,11 +412,37 @@ module.exports = function(BOT_TOKEN) {
             if (interaction.user.id !== ownerId) return interaction.reply({ content: '❌ 권한이 없습니다.', ephemeral: true });
             const cmd = interaction.commandName;
 
+            // 💡 파일 업로드 처리
+            if (cmd === '업로드') {
+                const file = interaction.options.getAttachment('파일');
+                const uploadDir = '/sdcard/download/bcbot';
+                const targetPath = path.join(uploadDir, file.name);
+
+                await interaction.deferReply(); 
+
+                try {
+                    // 폴더가 없으면 생성
+                    if (!fs.existsSync(uploadDir)) {
+                        fs.mkdirSync(uploadDir, { recursive: true });
+                    }
+                    
+                    // 디스코드 CDN에서 파일 다운로드 후 쓰기
+                    const response = await fetch(file.url);
+                    const arrayBuffer = await response.arrayBuffer();
+                    const buffer = Buffer.from(arrayBuffer);
+                    
+                    fs.writeFileSync(targetPath, buffer);
+                    
+                    return interaction.editReply(`✅ **파일 업로드 완료!**\n기기 저장 경로: \`${targetPath}\``);
+                } catch (e) {
+                    return interaction.editReply(`❌ 업로드 실패: ${e.message}`);
+                }
+            }
+
             if (cmd === '터미널설정') {
                 targetChannelId = interaction.channel.id; db.targetChannelId = targetChannelId; saveDB(); initTerminal();
                 return interaction.reply('✅ **채널 설정 및 터미널 초기화 완료.**');
             }
-            // 💡 새 명령어 처리 구문
             if (cmd === '세이브방설정') {
                 db.saveChannelId = interaction.channel.id; saveDB();
                 return interaction.reply('✅ **현재 채널이 세이브 파일 자동 업로드 방으로 설정되었습니다.** (`~/bcsave` 폴더 감시 중)');
