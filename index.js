@@ -82,6 +82,7 @@ module.exports = function(BOT_TOKEN) {
         });
     }
 
+    // 💡 대기 시간을 12초(12000ms)로 넉넉하게 연장
     function waitForTerminalReady() {
         return new Promise((resolve) => {
             let waitBuffer = '';
@@ -93,10 +94,10 @@ module.exports = function(BOT_TOKEN) {
             const onData = (data) => {
                 waitBuffer += stripAnsi(data);
                 if (idleTimer) clearTimeout(idleTimer);
-                idleTimer = setTimeout(() => { finish(); }, 5000); 
+                idleTimer = setTimeout(() => { finish(); }, 12000); 
             };
             ptyProcess.on('data', onData);
-            idleTimer = setTimeout(() => { finish(); }, 5000);
+            idleTimer = setTimeout(() => { finish(); }, 12000);
         });
     }
 
@@ -104,19 +105,12 @@ module.exports = function(BOT_TOKEN) {
         const root = { type: 'root', children: [] };
         const stack = [root];
 
-        const expandedSeq = [];
-        for (const rawLine of flatSeq) {
-            const parts = String(rawLine).split(/\\n|\n/);
-            for (const p of parts) {
-                if (p.trim() !== '') expandedSeq.push(p.trim());
-            }
-        }
-
-        for (let i = 0; i < expandedSeq.length; i++) {
-            let line = expandedSeq[i];
+        for (let i = 0; i < flatSeq.length; i++) {
+            let line = flatSeq[i];
             const currentBlock = stack[stack.length - 1];
 
-            const openMatch = line.match(/^(.*?)_include_(.*?)\($/);
+            // 💡 \n 이 섞여 있어도 통째로 인식하도록 정규식 개선 ([\s\S] 사용)
+            const openMatch = line.match(/^([\s\S]*?)_include_([\s\S]*?)\($/);
             if (openMatch) {
                 const node = { type: 'if', cmd: openMatch[1].trim(), key: openMatch[2].trim(), children: [] };
                 currentBlock.children.push(node);
@@ -162,7 +156,7 @@ module.exports = function(BOT_TOKEN) {
                     actualCmd = actualCmd.replace(new RegExp(`save_${key}`, 'g'), val);
                 }
 
-                if (logChannel) await logChannel.send(`> <@${user.id}>: \`${actualCmd}\``);
+                if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\``);
                 ptyProcess.write(actualCmd + '\r');
                 execState.finalOutput = await waitForTerminalReady();
 
@@ -175,7 +169,7 @@ module.exports = function(BOT_TOKEN) {
                     actualKey = actualKey.replace(new RegExp(`save_${key}`, 'g'), val);
                 }
 
-                if (logChannel) await logChannel.send(`> <@${user.id}>: \`${actualCmd}\` 🔍(조건검사: \`${actualKey}\` 포함 대기)`);
+                if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\` 🔍(조건검사: \`${actualKey}\` 포함 대기)`);
                 ptyProcess.write(actualCmd + '\r');
                 execState.finalOutput = await waitForTerminalReady();
 
@@ -189,7 +183,6 @@ module.exports = function(BOT_TOKEN) {
         }
     }
 
-    // --- 대기열 및 상점 렌더링 영역 ---
     async function updateQueueEmbed() {
         if (!db.shopChannelId || !queueMessageId) return;
         const channel = client.channels.cache.get(db.shopChannelId);
@@ -205,7 +198,6 @@ module.exports = function(BOT_TOKEN) {
             embed.setDescription(desc);
         }
 
-        // 💡 대기열 갱신 시에도 '내 티켓 확인' 버튼을 항상 유지
         const actionRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('check_balance').setLabel('💳 내 코인(티켓) 확인').setStyle(ButtonStyle.Secondary)
         );
@@ -236,7 +228,6 @@ module.exports = function(BOT_TOKEN) {
         await updateQueueEmbed();
     }
 
-    // --- 시퀀스 프로세서 ---
     async function processQueue() {
         if (isExecuting || sequenceQueue.length === 0) return;
         isExecuting = true;
@@ -310,7 +301,7 @@ module.exports = function(BOT_TOKEN) {
             { name: '터미널설정', description: '이 채널을 터미널로 설정합니다. (초기화 됨)' },
             { name: '티켓수설정', description: '유저의 티켓 수를 지정합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '티켓 수량', required: true}] },
             { name: '티켓주기', description: '유저에게 티켓을 지급합니다.', options: [{type: 6, name: '유저', description: '대상 유저', required: true}, {type: 4, name: '수량', description: '추가할 수량', required: true}] },
-            { name: '확인', description: '해당 유저의 데이터(보유 코인 등)를 확인합니다.', options: [{type: 6, name: '유저', description: '조회할 유저', required: true}] }, // 💡 새로 추가된 명령어
+            { name: '확인', description: '해당 유저의 데이터(보유 코인 등)를 확인합니다.', options: [{type: 6, name: '유저', description: '조회할 유저', required: true}] },
             { name: '상점방설정', description: '이 채널을 상점방으로 설정합니다.' },
             { name: '상점추가', description: '상점에 JSON 상품을 추가합니다.', options: [
                 {type: 3, name: '상품id', description: '고유 ID', required: true},
@@ -403,7 +394,6 @@ module.exports = function(BOT_TOKEN) {
                 if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
             }
             
-            // 💡 새로 추가된 관리자용 조회 명령어 (/확인)
             if (cmd === '확인') {
                 const user = interaction.options.getUser('유저');
                 const tickets = db.tickets[user.id] || 0;
@@ -415,12 +405,11 @@ module.exports = function(BOT_TOKEN) {
             }
         }
 
-        // 💡 일반 유저용 코인 확인 버튼 이벤트
         if (interaction.isButton() && interaction.customId === 'check_balance') {
             const userTickets = db.tickets[interaction.user.id] || 0;
             return interaction.reply({ 
                 content: `💳 **${interaction.user.username}**님의 현재 보유 코인(티켓)은 **${userTickets}개** 입니다.`, 
-                ephemeral: true // 자신에게만 보이게
+                ephemeral: true 
             });
         }
 
