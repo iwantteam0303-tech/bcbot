@@ -116,11 +116,11 @@ module.exports = function(BOT_TOKEN) {
             const onData = (data) => {
                 waitBuffer += stripAnsi(data.toString());
                 if (idleTimer) clearTimeout(idleTimer);
-                idleTimer = setTimeout(() => { finish(); }, 12000); 
+                idleTimer = setTimeout(() => { finish(); }, 30000); 
             };
             if (ptyProcess && ptyProcess.stdout) ptyProcess.stdout.on('data', onData);
             if (ptyProcess && ptyProcess.stderr) ptyProcess.stderr.on('data', onData);
-            idleTimer = setTimeout(() => { finish(); }, 12000);
+            idleTimer = setTimeout(() => { finish(); }, 30000);
         });
     }
 
