@@ -51,7 +51,6 @@ module.exports = function(BOT_TOKEN) {
 
     const stripAnsi = (str) => str.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
 
-    // 💡 죽은 터미널에 입력해도 봇이 안 터지게 막아주는 방어막
     function writeTerminal(cmd) {
         try {
             if (ptyProcess && ptyProcess.stdin && !ptyProcess.killed) {
@@ -104,33 +103,53 @@ module.exports = function(BOT_TOKEN) {
         if (ptyProcess.stderr) ptyProcess.stderr.on('data', handleData);
     }
 
-    function waitForTerminalReady() {
+    // 💡 [핵심 로직] 내가 입력한 명령어(에코)만 떴을 땐 무시하고 진짜 결과값이 나오면 그때부터 30초 대기
+    function waitForTerminalReady(expectedEcho = '') {
         return new Promise((resolve) => {
             let waitBuffer = '';
             let idleTimer = null;
+            let started = false;
+
             const finish = () => {
                 if (ptyProcess && ptyProcess.stdout) ptyProcess.stdout.removeListener('data', onData);
                 if (ptyProcess && ptyProcess.stderr) ptyProcess.stderr.removeListener('data', onData);
                 resolve(waitBuffer);
             };
+
             const onData = (data) => {
                 waitBuffer += stripAnsi(data.toString());
+                
+                // 줄바꿈, 띄어쓰기 싹 다 지우고 글자만 비교
+                const cleanBuffer = waitBuffer.replace(/\s+/g, '');
+                const cleanEcho = expectedEcho.replace(/\s+/g, '');
+                
+                if (!started) {
+                    // 아무것도 안 떴거나, 딱 내가 친 글자까지만 떴다면 (타이머 안 돌림)
+                    if (cleanBuffer === '' || cleanBuffer === cleanEcho) {
+                        return; 
+                    }
+                    // 그 외 진짜 다른 값이 출력되기 시작했다면 트리거 발동
+                    started = true;
+                }
+
+                // 진짜 값이 출력된 시점부터 30초 대기
                 if (idleTimer) clearTimeout(idleTimer);
-                idleTimer = setTimeout(() => { finish(); }, 90000); 
+                idleTimer = setTimeout(() => { finish(); }, 30000); 
             };
+
             if (ptyProcess && ptyProcess.stdout) ptyProcess.stdout.on('data', onData);
             if (ptyProcess && ptyProcess.stderr) ptyProcess.stderr.on('data', onData);
-            idleTimer = setTimeout(() => { finish(); }, 90000);
+            
+            // 혹시나 에러가 나서 영원히 응답이 안 올 경우 봇 멈춤 방지용 (안전장치 2분)
+            setTimeout(() => { if (!started) finish(); }, 120000);
         });
     }
 
-    // 💡 [수정됨] \n을 강제로 쪼개서 따로 실행하지 않고, 묶어서 통째로 터미널에 밀어넣도록 로직 개선
     function buildAST(flatSeq) {
         const root = { type: 'root', children: [] };
         const stack = [root];
 
         for (let i = 0; i < flatSeq.length; i++) {
-            // \n 이나 \\n 을 쪼개지 않고 실제 줄바꿈 기호로 치환만 함
             let line = String(flatSeq[i]).replace(/\\n/g, '\n').trim();
             if (line === '') continue;
 
@@ -184,7 +203,8 @@ module.exports = function(BOT_TOKEN) {
 
                 if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\``).catch(()=>{});
                 writeTerminal(actualCmd + '\n');
-                execState.finalOutput = await waitForTerminalReady();
+                // 명령어(actualCmd)를 넘겨서 자기 자신(메아리)은 반응 조건에서 제외하게 함
+                execState.finalOutput = await waitForTerminalReady(actualCmd);
 
             } else if (node.type === 'if') {
                 let actualCmd = node.cmd;
@@ -197,7 +217,7 @@ module.exports = function(BOT_TOKEN) {
 
                 if (logChannel) await logChannel.send(`> <@${user.id}>: \n\`\`\`text\n${actualCmd}\n\`\`\` 🔍(조건검사: \`${actualKey}\` 포함 대기)`).catch(()=>{});
                 writeTerminal(actualCmd + '\n');
-                execState.finalOutput = await waitForTerminalReady();
+                execState.finalOutput = await waitForTerminalReady(actualCmd);
 
                 if (execState.finalOutput.includes(actualKey)) {
                     if (logChannel) await logChannel.send(`✅ **[조건 만족]** \`${actualKey}\` 문자열이 발견되어 내부 시퀀스를 실행합니다.`).catch(()=>{});
@@ -426,3 +446,150 @@ module.exports = function(BOT_TOKEN) {
                         }
                         const response = await fetch(file.url);
                         const arrayBuffer = await response.arrayBuffer();
+                        fs.writeFileSync(targetPath, Buffer.from(arrayBuffer));
+                        return interaction.editReply(`✅ **파일 업로드 완료!**\n기기 저장 경로: \`${targetPath}\``).catch(()=>{});
+                    } catch (e) {
+                        return interaction.editReply(`❌ 업로드 실패`).catch(()=>{});
+                    }
+                }
+
+                if (cmd === '터미널설정') {
+                    targetChannelId = interaction.channel.id; db.targetChannelId = targetChannelId; saveDB(); initTerminal();
+                    return interaction.reply('✅ **채널 설정 및 터미널 초기화 완료.**').catch(()=>{});
+                }
+                if (cmd === '세이브방설정') {
+                    db.saveChannelId = interaction.channel.id; saveDB();
+                    return interaction.reply('✅ **현재 채널이 세이브 파일 자동 업로드 방으로 설정되었습니다.**').catch(()=>{});
+                }
+                if (cmd === '업데이트') {
+                    await interaction.reply('🔄 **시스템을 재시작합니다.**').catch(()=>{});
+                    setTimeout(() => { process.exit(0); }, 1000); return;
+                }
+                if (cmd === '자동세팅') {
+                    const file = interaction.options.getAttachment('json파일');
+                    if (!file.name.endsWith('.json')) return interaction.reply({ content: '❌ JSON 파일만 가능합니다.', flags: 64 }).catch(()=>{});
+                    try {
+                        const response = await fetch(file.url); const jsonData = await response.json();
+                        if (!jsonData.Sequence) return interaction.reply({ content: '❌ Sequence 배열이 없습니다.', flags: 64 }).catch(()=>{});
+                        buildAST(jsonData.Sequence);
+                        db.autoSetupSequence = jsonData.Sequence; saveDB();
+                        return interaction.reply('✅ **자동 세팅 시퀀스 등록 완료.**').catch(()=>{});
+                    } catch (e) { return interaction.reply({ content: `❌ 에러 발생`, flags: 64 }).catch(()=>{}); }
+                }
+                if (cmd === '상점방설정') {
+                    db.shopChannelId = interaction.channel.id; saveDB();
+                    await interaction.reply({ content: '✅ 상점 렌더링 중...', flags: 64 }).catch(()=>{}); await renderShop(interaction.channel); return;
+                }
+                if (cmd === '상점추가') {
+                    const id = interaction.options.getString('상품id'); const file = interaction.options.getAttachment('json파일');
+                    const title = interaction.options.getString('상품제목'); const desc = interaction.options.getString('상품설명'); const price = interaction.options.getInteger('가격');
+                    try {
+                        const response = await fetch(file.url); const jsonData = await response.json();
+                        db.shopItems[id] = { title, description: desc, price, options: jsonData.Options, sequenceAST: buildAST(jsonData.Sequence) }; saveDB();
+                        await interaction.reply({ content: `✅ 추가 완료!`, flags: 64 }).catch(()=>{});
+                        if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
+                    } catch (e) { return interaction.reply({ content: `❌ 에러 발생`, flags: 64 }).catch(()=>{}); }
+                }
+                if (cmd === '티켓수설정' || cmd === '티켓주기') {
+                    const user = interaction.options.getUser('유저'); const amt = interaction.options.getInteger('수량');
+                    if (cmd === '티켓수설정') db.tickets[user.id] = amt; else db.tickets[user.id] = (db.tickets[user.id] || 0) + amt;
+                    saveDB(); return interaction.reply(`✅ ${user.username}님의 티켓: **${db.tickets[user.id]}개**`).catch(()=>{});
+                }
+                if (cmd === '상점제거') {
+                    const id = interaction.options.getString('상품id'); delete db.shopItems[id]; saveDB();
+                    await interaction.reply({ content: '✅ 제거 완료!', flags: 64 }).catch(()=>{});
+                    if (db.shopChannelId) { const ch = client.channels.cache.get(db.shopChannelId); if (ch) await renderShop(ch); }
+                }
+                if (cmd === '확인') {
+                    const user = interaction.options.getUser('유저');
+                    const tickets = db.tickets[user.id] || 0;
+                    const embed = new EmbedBuilder().setTitle(`📊 ${user.username}님의 데이터 조회`).addFields({ name: '보유 코인(티켓)', value: `**${tickets}개**` }).setColor(0x3498DB);
+                    return interaction.reply({ embeds: [embed] }).catch(()=>{});
+                }
+                if (cmd === 'db추출') {
+                    if (!fs.existsSync(DB_FILE)) return interaction.reply({ content: '❌ DB 파일이 없습니다.', flags: 64 }).catch(()=>{});
+                    return interaction.reply({ content: '📦 `db.json` 파일입니다.', files: [DB_FILE], flags: 64 }).catch(()=>{});
+                }
+                if (cmd === 'db입력') {
+                    const file = interaction.options.getAttachment('파일');
+                    if (!file.name.endsWith('.json')) return interaction.reply({ content: '❌ JSON 전용', flags: 64 }).catch(()=>{});
+                    try {
+                        const response = await fetch(file.url);
+                        const jsonData = await response.json();
+                        if (typeof jsonData !== 'object') return interaction.reply({ content: '❌ 형식 오류', flags: 64 }).catch(()=>{});
+                        db = { ...db, ...jsonData }; saveDB();
+                        await interaction.reply({ content: '✅ DB 적용 완료.', flags: 64 }).catch(()=>{});
+                        if (db.shopChannelId) { const shopChannel = client.channels.cache.get(db.shopChannelId); if (shopChannel) await renderShop(shopChannel); }
+                        return;
+                    } catch (e) { return interaction.reply({ content: `❌ 에러 발생`, flags: 64 }).catch(()=>{}); }
+                }
+            }
+
+            if (interaction.isButton() && interaction.customId === 'check_balance') {
+                const userTickets = db.tickets[interaction.user.id] || 0;
+                return interaction.reply({ content: `💳 **${interaction.user.username}**님의 티켓은 **${userTickets}개** 입니다.`, flags: 64 }).catch(()=>{});
+            }
+
+            if (interaction.isButton() && interaction.customId === 'close_thread') {
+                if (interaction.user.id !== ownerId) return interaction.reply({ content: '❌ 권한이 없습니다.', flags: 64 }).catch(()=>{});
+                await interaction.reply({ content: '🔒 쓰레드를 보관 처리합니다.' }).catch(()=>{});
+                if (interaction.channel.isThread()) await interaction.channel.setArchived(true).catch(()=>{});
+                return;
+            }
+
+            if (interaction.isButton() && interaction.customId.startsWith('buy_')) {
+                const itemId = interaction.customId.replace('buy_', ''); const item = db.shopItems[itemId];
+                const userTickets = db.tickets[interaction.user.id] || 0;
+                if (userTickets < item.price) return interaction.reply({ content: `❌ 티켓이 부족합니다.`, flags: 64 }).catch(()=>{});
+                activeSessions[interaction.user.id] = { itemId, currentChunk: 0, answers: {} };
+                
+                const session = activeSessions[interaction.user.id];
+                const chunkStart = session.currentChunk * 5; 
+                const currentOptions = item.options.slice(chunkStart, chunkStart + 5);
+                const modal = new ModalBuilder().setCustomId(`modal_form_${session.itemId}_${session.currentChunk}`).setTitle(`📝 상품 정보 입력`);
+                for (const opt of currentOptions) {
+                    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`input_${opt}`).setLabel(opt).setStyle(TextInputStyle.Short).setRequired(true)));
+                }
+                await interaction.showModal(modal).catch(()=>{});
+            }
+
+            if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_form_')) {
+                const session = activeSessions[interaction.user.id];
+                if (!session) return interaction.reply({ content: '❌ 시간 초과', flags: 64 }).catch(()=>{});
+                const item = db.shopItems[session.itemId];
+                const chunkStart = session.currentChunk * 5; const currentOptions = item.options.slice(chunkStart, chunkStart + 5);
+                for (const opt of currentOptions) {
+                    const rawVal = interaction.fields.getTextInputValue(`input_${opt}`);
+                    if (!/^[a-zA-Z0-9]+$/.test(rawVal)) { delete activeSessions[interaction.user.id]; return interaction.reply({ content: `❌ 영문/숫자만 가능`, flags: 64 }).catch(()=>{}); }
+                    session.answers[opt] = rawVal;
+                }
+                if ((session.currentChunk + 1) * 5 < item.options.length) {
+                    session.currentChunk += 1; 
+                    const nextChunkStart = session.currentChunk * 5; 
+                    const nextOptions = item.options.slice(nextChunkStart, nextChunkStart + 5);
+                    const modal = new ModalBuilder().setCustomId(`modal_form_${session.itemId}_${session.currentChunk}`).setTitle(`📝 상품 정보 입력`);
+                    for (const opt of nextOptions) {
+                        modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`input_${opt}`).setLabel(opt).setStyle(TextInputStyle.Short).setRequired(true)));
+                    }
+                    await interaction.showModal(modal).catch(()=>{});
+                } else {
+                    db.tickets[interaction.user.id] -= item.price; saveDB();
+                    sequenceQueue.push({ interaction, userId: interaction.user.id, itemTitle: item.title, answers: session.answers, sequenceAST: item.sequenceAST });
+                    await updateQueueEmbed();
+                    await interaction.reply({ content: `✅ 대기열에 등록되었습니다.`, flags: 64 }).catch(()=>{});
+                    delete activeSessions[interaction.user.id]; 
+                    processQueue();
+                }
+            }
+        } catch (error) {}
+    });
+
+    client.on('messageCreate', (message) => {
+        if (message.author.bot) return;
+        if ((message.channel.id === targetChannelId || (activeThreadId && message.channel.id === activeThreadId)) && message.author.id === ownerId) {
+            writeTerminal(message.content + '\n');
+        }
+    });
+
+    client.login(BOT_TOKEN).catch(()=>{});
+};
